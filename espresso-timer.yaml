@@ -153,6 +153,7 @@ sensor:
     state_class: measurement
     update_interval: 1s
     lambda: |-
+      if (!id(display_on).state) return NAN;
       if (id(timer_running)) {
         return (millis() - id(start_time_ms)) / 1000.0;
       }

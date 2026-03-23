@@ -16,7 +16,7 @@ esp32:
 logger:
 # ── Home Assistant API ────────────────────────────────────────
 api:
-# ── OTA Updates (replaces ArduinoOTA) ────────────────────────
+# ── OTA Updates ──────────────────────────────────────────────
 ota:
   - platform: esphome
     password: !secret ota_password
@@ -27,8 +27,8 @@ wifi:
   ap:                           # Fallback hotspot if WiFi drops
     ssid: "Espresso Timer AP"
     password: !secret ap_password
-captive_portal:                 # Allows reconfiguring WiFi via the fallback AP
-# ── NTP Time (replaces configTime / printLocalTime) ──────────
+captive_portal:
+# ── NTP Time ─────────────────────────────────────────────────
 time:
   - platform: sntp
     id: sntp_time
@@ -47,23 +47,20 @@ time:
           - sensor.template.publish:
               id: daily_shot_count
               state: "0"
-# ── I2C Bus (default ESP32 pins: SDA=GPIO21, SCL=GPIO22) ─────
-#    Verify these match your wiring; change if needed.
+# ── I2C Bus ───────────────────────────────────────────────────
 i2c:
   sda: GPIO21
   scl: GPIO22
   scan: true
 # ── Fonts ────────────────────────────────────────────────────
 font:
-  # Large font for the running shot timer
   - file: "gfonts://Roboto"
     id: font_timer
     size: 30
-  # Small font for idle screen (last shot + clock)
   - file: "gfonts://Roboto"
     id: font_small
     size: 12
-# ── Global Variables (replaces Arduino globals) ──────────────
+# ── Global Variables ─────────────────────────────────────────
 globals:
   - id: timer_running
     type: bool
@@ -73,37 +70,48 @@ globals:
     type: uint32_t
     restore_value: no
     initial_value: "0"
-  # Updated every display refresh while the pump runs
   - id: elapsed_seconds
     type: int
     restore_value: no
     initial_value: "0"
-  # Persists across reboots so the idle screen always shows something
   - id: last_shot_seconds
     type: int
     restore_value: yes
     initial_value: "0"
-  # Daily shot counter — persists across reboots, reset at midnight
   - id: shots_today
     type: int
     restore_value: yes
     initial_value: "0"
-# ── Reed Switch (replaces digitalRead loop) ──────────────────
+# ── Display On/Off Switch ─────────────────────────────────────
+# Expose a switch to Home Assistant so any automation can wake/sleep
+# the display — e.g. tie it to your espresso machine smart plug.
+# The state is restored after a reboot so it survives power cycles.
+switch:
+  - platform: template
+    name: "Display"
+    id: display_on
+    icon: "mdi:monitor"
+    restore_mode: RESTORE_DEFAULT_ON   # display on after first flash; remembered thereafter
+    optimistic: true                   # state is set immediately when toggled
+    turn_on_action:
+      - lambda: "id(oled).turn_on();"
+    turn_off_action:
+      - lambda: "id(oled).turn_off();"
+# ── Reed Switch ──────────────────────────────────────────────
 binary_sensor:
   - platform: gpio
     pin:
       number: GPIO16
       mode:
         input: true
-        pullup: true    # matches INPUT_PULLUP
-      inverted: true    # LOW = triggered, same as original (== LOW check)
+        pullup: true
+      inverted: true
     id: reed_switch
     name: "Espresso Group Active"
     device_class: running
     filters:
-      - delayed_on: 50ms    # debounce — ignore glitches shorter than 50 ms
+      - delayed_on: 50ms
       - delayed_off: 50ms
-    # ── Pump starts → begin timing ──────────────────────────
     on_press:
       then:
         - globals.set:
@@ -113,37 +121,29 @@ binary_sensor:
             id: elapsed_seconds
             value: "0"
         - lambda: "id(start_time_ms) = millis();"
-    # ── Pump stops → save last shot, publish to HA ──────────
     on_release:
       then:
         - globals.set:
             id: timer_running
             value: "false"
-        # Capture the final elapsed value at the exact moment the pump stops
         - lambda: "id(last_shot_seconds) = id(elapsed_seconds);"
-        # Push the completed shot duration to Home Assistant
         - sensor.template.publish:
             id: last_shot_duration
             state: !lambda "return id(last_shot_seconds);"
-        # Only count shots ≥ 15 seconds (ignore test/purge pulls)
         - lambda: |-
             if (id(last_shot_seconds) >= 15) {
               id(shots_today) += 1;
               id(daily_shot_count).publish_state(id(shots_today));
             }
-# ── Sensors exposed to Home Assistant ────────────────────────
+# ── Sensors ──────────────────────────────────────────────────
 sensor:
-  # Published once per shot completion — HA logs every value change,
-  # giving you a full shot history in the History panel and usable
-  # in automations/statistics helpers.
   - platform: template
     name: "Last Shot Duration"
     id: last_shot_duration
     unit_of_measurement: "s"
     icon: "mdi:coffee"
     accuracy_decimals: 0
-    state_class: measurement   # enables long-term statistics in HA
-  # Live counter while the pump is running (updates every second)
+    state_class: measurement
   - platform: template
     name: "Current Shot Duration"
     id: current_shot_duration
@@ -157,7 +157,6 @@ sensor:
         return (millis() - id(start_time_ms)) / 1000.0;
       }
       return 0;
-  # Number of qualifying shots (≥ 15s) pulled today — resets at midnight
   - platform: template
     name: "Shots Today"
     id: daily_shot_count
@@ -170,25 +169,22 @@ display:
     model: "SSD1306 128x32"
     address: 0x3C
     id: oled
-    update_interval: 100ms    # 10 fps — matches original delay(100)
+    update_interval: 100ms
     lambda: |-
       if (id(timer_running)) {
-        // ── Running: large centred elapsed time ─────────────
         id(elapsed_seconds) = (millis() - id(start_time_ms)) / 1000;
         it.printf(
-          64, 16,                       // centre of 128×32 display
+          64, 16,
           id(font_timer),
           TextAlign::CENTER,
           "%d", id(elapsed_seconds)
         );
       } else {
-        // ── Idle: last shot duration + current time ──────────
         it.printf(
           0, 2,
           id(font_small),
           "LAST SHOT: %3ds", id(last_shot_seconds)
         );
-        // Only show the clock once time has synced
         if (id(sntp_time).now().is_valid()) {
           it.strftime(
             0, 18,
